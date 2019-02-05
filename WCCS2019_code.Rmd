@@ -1,0 +1,684 @@
+---
+title: 'WCSS 2019: <br>Exploring Twitter Trolls'
+author: "Benjamin Ortiz Ulloa"
+date: "2/4/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#open human foundation for addiction data
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introduction
+
+This is the code used for my exploration of [NBC's 2016 Twitter Troll Dataset](https://www.kaggle.com/vikasg/russian-troll-tweets). It heavily uses packages found in the **tidyverse** such as `dplyr`, `purrr`, `stringr`, `tidyr`, and `ggplot2`. If you haven't used many **tidyverse** packages, then a good resource to learn more about them is [Grolemund and Wickham's **R for Data Science**](https://r4ds.had.co.nz). Also, a particularly good resource to learn about `purrr` - a package for iterating over lists and vectors - then please read [Bryan's **purrr tutorial**](https://jennybc.github.io/purrr-tutorial/). Also, I do not focus on graph visualization in this tutorial. If you want to learn more about graph/network visualization's in **R** and `igraph`, then please check out [Ognyanova's **AMAZING graph visualization tutorials**](http://kateto.net/tutorials/).
+
+Because the code here depends on so many different packages, I explicitly prependded each function with the package that it came from. This takes the format of `package::function`. While this is a lot more verbose and adds clutter to the tutorial, it makes it clear what functions you are using and where the functions are coming from. 
+
+Finally, the only package I will load is the `magrittr` package. This is because the `%>%` pipe function makes it easy to logically order functions. Essentially, it allows users to "unnest" functions. For example, the following function is difficult to read because the logic follows from the innermost function outwards.
+
+```{r}
+unlist(strsplit(toupper('hello world'), ' '))
+```
+
+However, written with the `%>%` pipe, we can reason about the code piecemeal. 
+
+```{r}
+library(magrittr)
+
+'hello world' %>%
+  toupper() %>%
+  strsplit(' ') %>%
+  unlist()
+```
+
+If the above code confuses you, try to think that the output of the first function is the first input of the second function, the output of the second function is the first input of the first function, and so on...
+
+To proceed with this tutorial you should have the following installed:
+
+```
+install.packages(`dplyr`,
+                 `ggplot2`,
+                 'igraph',
+                 `purrr`,
+                 `readr`,
+                 'stm',
+                 `stringr`
+                 `tidyr`,
+                 'tidytext'
+                 )
+```
+
+# Explore Twitter Retweet Network
+
+Before anything, let's load the data and look at what columns we have available. 
+
+```{r, message=F}
+#load data
+tweets <- readr::read_csv('../../igraph-data-days-texas-2019/russian-troll-tweets/tweets.csv')
+
+names(tweets)
+```
+
+To create a retweeting network, we only need two columns from this data set - **user_key** and **text**. We can isolate these two columns with `dplyr::select`:
+
+```{r}
+
+retweet_network <- tweets  %>% 
+  dplyr::select(user_key, text) %>%
+  dplyr::mutate(text = stringr::str_replace_all(text, "\\r|\\n", '') ) #clean text of newlines
+
+
+retweet_network %>%
+  head() %>%
+  knitr::kable()
+```
+
+Tweets that are actually retweets begin with **RT**.  Because we only care about tweets that were retweeted, we can use `dplyr::filter` to only include instances of retweets. `stringr::str_detect` returns a boolean (*TRUE*/*FALSE*) for text that includes a string we are looking for.
+
+```{r}
+retweet_network <- retweet_network %>%
+  dplyr::filter(stringr::str_detect(text, '^RT\\s')) 
+
+retweet_network %>%
+  head() %>%
+  knitr::kable()
+```
+
+There is a clear pattern in the text. The character string *RT* is always followed by the twitter handle that is being retweeted. We can use `stringr::str_extract` to pull the twitter handles and `dplyr::mutate` to create a new column with this extracted information.
+
+The code below includes `(?<=@)[^:]+(?=:)`. This is a regex string. [Click this link to learn more about regex](). The other functions are used for cleaning and formatting purposes.
+
+```{r}
+
+retweet_network <- retweet_network %>%
+  dplyr::mutate(retweeted_account = stringr::str_extract(text, '(?<=@)[^:]+(?=:)') %>%
+                  stringr::str_to_lower()) %>% #standardize twitter handles to lower case
+  dplyr::filter(!is.na(retweeted_account)) %>% #remove text that starts with "RT" but aren't actually retweets
+  dplyr::select(user_key, retweeted_account, text) %>% #reorder columns
+  dplyr::distinct()
+
+retweet_network %>%
+  head() %>%
+  knitr::kable()
+```
+
+We don't necessarily care about the individual tweets. What we really care about is who a troll retweeted and how often. We can use `dplyr::count` to aggregate the total number of instances a particular `user_key` retweeted another acount
+
+```{r}
+retweet_network_wt <- retweet_network %>%
+  dplyr::count(user_key, retweeted_account, sort = T)
+
+retweet_network_wt %>%
+  head() %>%
+  knitr::kable()
+```
+
+This is a data frame with `r nrow(retweet_network_wt)`. This data frame represents an edge list and so we may have too many edges to get a good understanding of our data. We can filter the edges down by choosing a cutoff for the edges. That is, if we assume that a troll retweeting an account less than 5 times is insignificant for our analysis, then we can remove them and clean up our graph. 
+
+```{r}
+filter_n <- 5
+
+retweet_network_wt <- retweet_network_wt  %>%
+  dplyr::filter(n >= filter_n) 
+
+retweet_network_wt %>%
+  head() %>%
+  knitr::kable()
+```
+
+Cool, now we have only `r nrow(retweet_network_wt)` edges in our graph. Let's now convert the edge list data frame into an actual **igraph** graph. We can do this using `igraph::graph_from_data_frame`
+
+```{r}
+g_rtwt <- igraph::graph_from_data_frame(retweet_network_wt)
+
+summary(g_rtwt)
+```
+
+The **D** at the top of the summary stands for **Directed Graph**, that is, direction matters for the edges. The **N** stands for **Named Graph**, that is, each node has a unque name. We can add metadata to the graph directly with `$` notation - similar to how we would in a list. Any valid name for a list or data frame will be a valid name for a graph attribute. The number of nodes (`r igraph::vcount(g_rtwt)`) and the number of edges (`r igraph::ecount(g_rtwt)`) follows the graph's metadata. We are also given a list of edge attributes (**e/c(haracter)**, **e/n(numeric)**, **e/l(ogical)**) and vertex attributes (**v/...**). 
+
+```{r}
+g_rtwt$name <- '2016 Russian Twitter Troll Retweet Network'
+g_rtwt$info <- "A graph inspired by NBC's and Neo4j's exploration."
+
+summary(g_rtwt)
+```
+
+The name attribute is a special attribute for a graph and is shown in the summary. We can use `$` notation to retrieve  other graph attributes. 
+
+```{r}
+g_rtwt$info
+```
+If we want to plot a graph, then we simply need to use the `plot` function. For **igraph** graphs, plot takes special parameters to manipulate the vertices and edges on the plot. We will not go into depth about plotting graphs, but if you want to learn more, then please visit [Katya Ognyanova's detail tutorials on graph visualization.](). You can also use `?igraph.plotting` to learn more. 
+
+```{r}
+set.seed(4321)
+plot(
+  g_rtwt,
+  vertex.size = 2,
+  vertex.label = '',
+  edge.arrow.size = .05,
+  edge.width = .25,
+  asp = 0 #aspect ratio
+)
+```
+
+**igraph** can readily calculate many different centrality measurements such as `igraph::betweenness`, `igraph::degree`, and `igraph::eigen_centrality`. We will focus on `igraph::page_rank`. These functions return scores at the node level and the order of the scores correspond with the order of the vertices. 
+
+```{r}
+pr <- igraph::page_rank(g_rtwt)$vector
+head(pr)
+head(igraph::V(g_rtwt)$name)
+```
+
+Because these measurements have the same order of the vertices, we can store the measurements as a vertex attribute. 
+
+```{r}
+igraph::V(g_rtwt)$PageRank <- pr
+igraph::V(g_rtwt)[[1:6]]
+```
+
+If we want to match the vertex information with outside information, the easiest way we can do that is convert the vertex list into a data frame with `igraph::as_data_frame` and then join it with the new data with `dplyr::?_join`. Let's combine the vertex list with a troll's total number of tweets. 
+
+```{r}
+vertex_df <- igraph::as_data_frame(g_rtwt, 'vertices') %>%
+  dplyr::arrange(desc(PageRank))
+
+edges_df <- igraph::as_data_frame(g_rtwt, 'edges')
+  
+total_tweets <- tweets %>%
+  dplyr::select(user_key, text) %>%
+  dplyr::count(user_key) %>%
+  dplyr::rename(TotalTweets = n)
+
+vertex_df <- dplyr::left_join(vertex_df, total_tweets, by = c('name' = 'user_key'))
+
+vertex_df %>%
+  head() %>%
+  knitr::kable()
+```
+
+If the **TotalTweets** of a node is `NA`, then the account is not listed in the list of trolls. This means the twitter trolls are retweeting tweets from real accounts. Let's recreate the network and use the **TotalTweets** vertex attribute as something to filter out. We can actuaally remove vertices from a graph with `-`.
+
+```{r}
+g_rtwt <- igraph::graph_from_data_frame(edges_df, T, vertex_df) %>%
+  {. - igraph::V(.)[is.na(TotalTweets)]} %>%
+  {. - igraph::V(.)[igraph::degree(.) == 0]} #remove unconnected nodes
+
+summary(g_rtwt)
+```
+
+Let's re-plot the graph.
+
+```{r}
+set.seed(4321)
+g_rtwt %>%
+  plot(
+    vertex.size = igraph::V(.)$PageRank/max(igraph::V(.)$PageRank) * 5 + 2,
+    vertex.label = '',
+    edge.arrow.size = .05,
+    edge.width = .25,
+    asp = 0 #aspect ratio
+  )
+```
+
+**igraph** has a number of community detection alogrithms to use including `igraph::informap.community`, `igraph::spinglass.community`, and `igraph::fastgreedy.community`. Here, we will use `igraph::walktrap.community`. 
+```{r}
+g_community <- igraph::walktrap.community(graph = g_rtwt)
+names(g_community)
+```
+
+The the community membership is listed in the same order as the vertices. This means we can store the membership as a vertex attribute. The communities are repesented as numbers. This particular graph has `max(g_community$membership)` communities. We can create a color palette for these communities. 
+
+```{r}
+igraph::V(g_rtwt)$community <- g_community$membership
+
+community_pal <- scales::brewer_pal('qual')(max(igraph::V(g_rtwt)$community))
+names(community_pal) <- 1:max(igraph::V(g_rtwt)$community)
+
+community_pal
+```
+
+**color** is a special vertex attribute. If it exists, then the color stored in the vertex is automatically plotted. Let's iterate over the vertice and assign a color according to it's community
+
+```{r}
+igraph::V(g_rtwt)$color <- purrr::map_chr(igraph::V(g_rtwt)$community, function(x){
+  community_pal[[x]]
+})
+
+set.seed(4321)
+g_rtwt %>%
+  plot(
+      vertex.size = igraph::V(.)$PageRank/max(igraph::V(.)$PageRank) * 5 + 2,
+      vertex.label = '',
+      edge.arrow.size = .05,
+      edge.width = .25,
+      asp = 0 #aspect ratio
+  )
+```
+
+Let's take a moment to actually analyze the hashtags associated with these users. We can go back to our original dataset and try to match users with hashtags. 
+
+```{r}
+tweet_hashtag <- tweets %>% 
+  dplyr::select(user_key, hashtags, text) %>%
+  dplyr::distinct()%>% 
+  dplyr::filter(hashtags != '[]') %>% #this represents a tweet with no hashtags
+  dplyr::mutate(hashtags = purrr::map(hashtags, jsonlite::fromJSON)) %>% #the stored info is a json file
+  tidyr::unnest()  %>%
+  dplyr::select(user_key, hashtags)
+```
+
+Join the hashtag data with the vertex data, then aggregate 
+
+
+```{r}
+vertex_df <- igraph::as_data_frame(g_rtwt, 'vertices')
+edge_df <- igraph::as_data_frame(g_rtwt, 'edges')
+
+community_hashtags <- vertex_df %>%
+  dplyr::left_join(tweet_hashtag, by = c('name' = 'user_key')) %>%
+  dplyr::count(community, hashtags, sort = T)  %>%
+  dplyr::group_by(community) %>%
+  dplyr::top_n(6, wt = n) %>%
+  dplyr::ungroup()
+
+community_hashtags %>%
+  head() %>%
+  knitr::kable()
+```
+
+```{r}
+
+community_hashtags %>%
+  dplyr::mutate(hashtags = purrr::map2_chr(hashtags, community, ~paste0(paste0(rep(' ', as.numeric(.y)), collapse = ''), .x))) %>%
+  dplyr::arrange(desc(n)) %>%
+  dplyr::mutate(hashtags = factor(hashtags, unique(hashtags))) %>%
+  ggplot2::ggplot(ggplot2::aes(x = hashtags, y = n, fill = as.character(community))) +
+  ggplot2::geom_col(color = 'black') +
+  ggplot2::facet_wrap(~community, scales = 'free') +
+  ggplot2::scale_fill_manual(values = community_pal) +
+  ggplot2::coord_flip()+
+  ggplot2::theme_bw() +
+  ggplot2::theme(legend.position="none") +
+  ggplot2::labs(
+    x = ''
+  )
+```
+
+# Explore the usage of hashtags
+
+Let's revisit the `tweet_hashtag` data frame we created earlier.
+
+```{r}
+head(tweet_hashtag) %>%
+  knitr::kable()
+```
+
+If the first two columns of a data frame represent the two connected nodes in an edge list, then this data frame represents a bipartite network in which one node type is **user** and the other node type is **hashtag**.  
+
+```{r, echo = F}
+tweet_hashtag_edges <- tweet_hashtag %>%
+  dplyr::count(user_key, hashtags, sort = T) %>% #aggregation user-hashtag occurances
+  dplyr::rename(weight = n) %>%
+  dplyr::mutate(type = 'used_hashtag', #we can have multiple connection types, let's be clear
+         user_key = paste0('@', user_key),              #prevent duplicate node names
+         hashtags = paste0('#', hashtags) %>% tolower() #prevent duplicate node names
+         ) 
+
+head(tweet_hashtag_edges) %>%
+  knitr::kable()
+```
+
+
+
+```{r, echo = F}
+tweet_hashtag_nodes <- dplyr::bind_rows(
+  tibble::tibble(
+    label = tweet_hashtag_edges$hashtags %>% unique(),
+    type = 'hashtag',
+    color = 'lightgrey',
+    size = 3
+  ),
+    tibble::tibble(
+    label = tweet_hashtag_edges$user_key %>% unique(),
+    type = 'user',
+    color = 'purple',
+    size = 3
+  )
+)
+
+tweet_hashtag_g <-  igraph::graph_from_data_frame(tweet_hashtag_edges, 
+                                                  directed = T, 
+                                                  vertices = tweet_hashtag_nodes)
+
+summary(tweet_hashtag_g)
+```
+
+Again, to minimize the number of edges we got the count of **user_key** -> **hashtags** connection. We only want to keep the edges that "matter" and so we remove connections that occur less than a certain amount of times. 
+
+```{r}
+filter_n <- 6
+
+tweet_hashtag_g <- tweet_hashtag_g %>%
+  {. - igraph::E(.)[weight < filter_n]} %>%   #remove edges with weight less than the cutoff
+  {. - igraph::V(.)[igraph::degree(.) == 0]}  #remove vertices that have no connections
+
+summary(tweet_hashtag_g)
+```
+
+```{r}
+set.seed(4321)
+tweet_hashtag_g %>%
+  plot( 
+     vertex.label = '',
+     edge.arrow.mode = '-',
+     edge.width = .1,
+     layout = igraph::layout_as_bipartite(., types = igraph::V(.)$type == 'hashtag'),
+     asp = 0
+     )
+```
+
+The cool thing about bipartite graphs is that we can derive single type graphs. That is, we can project a new graph by combining two nodes of the same type by the mutual neighboring nodes they share. 
+
+```{r}
+tweet_hashtag_g %>%
+  {
+    igraph::V(.)$type <- igraph::V(.)$type == 'user'; #boolean type is necessary for bipartite projection
+    igraph::V(.)$degree <- igraph::degree(.); #the total number of connected edges
+    igraph::V(.)$weighted_degree <- igraph::strength(.); #the sum of connected edge weights
+    .
+  } %>%
+  igraph::bipartite_projection() %>%
+  {
+    . <- purrr::map(., function(x){
+      igraph::V(x)$component <-igraph::components(x)$membership;
+      return(x)
+    })
+    hashtag_g <<- .$proj1; #projection 1 is type FALSE (hashtags)
+    user_g <<- .$proj2; #projection 2 is type TRUE (user)
+  }
+```
+
+By projecting the bipartite graph we now have two graphs. A graph where users are indirectly connected to other users by the hashtags they both use...
+
+```{r}
+set.seed(4321)
+plot(user_g, vertex.size = 3, vertex.label = '', asp = 0)
+
+```
+
+and a graph where hashtags are indirectly connected to other hashtags by the users that use them. 
+
+```{r, echo = F}
+
+set.seed(4321)
+l <- igraph::layout_nicely(hashtag_g)
+igraph::V(hashtag_g)$x <- l[,1] #keep vertex positions consistent by storing x axis as an attribute
+igraph::V(hashtag_g)$y <- l[,2] #keep vertex positions consistent by storing y axis as an attribute
+
+plot(hashtag_g, vertex.size = 3, vertex.label = '', asp = 0)
+```
+
+This projected graph of hashtags has multiple components, for now, let's only exampine the largest component. We can see which vertex belongs to which component with `igraph::components`. We can then group the components together with `igraph::groups` and remove all nodes that do not belong in the largest comonent. 
+
+```{r}
+hashtag_g_components <- igraph::components(hashtag_g)
+
+largestComponent <- hashtag_g_components %>%
+  igraph::groups() %>%
+  {
+    maxL <- max(purrr::map_dbl(., length));
+    .[purrr::map_lgl(., function(x){length(x) == maxL})] %>%
+      unlist()
+  } %>%
+  {hashtag_g - igraph::V(hashtag_g)[!name %in% .]}
+  
+
+plot(largestComponent, vertex.size = 3, vertex.label = '', edge.width = .1, asp = 0)
+```
+
+We can now return to the measurements and community detection alorithms we used earlier.
+
+```{r}
+igraph::V(largestComponent)$community <- igraph::walktrap.community(largestComponent)$membership
+igraph::V(largestComponent)$PageRank <- igraph::page_rank(largestComponent)$vector
+
+hashtag_pal <- scales::brewer_pal('qual')(max(igraph::V(largestComponent)$community))
+names(hashtag_pal) <- as.character(1:length(hashtag_pal)) #named vector is useful for ggplot2
+
+igraph::V(largestComponent)$color <- purrr::map_chr(igraph::V(largestComponent)$community, ~hashtag_pal[.x])
+
+largestComponent %>%
+  plot(
+    vertex.label= '',
+    vertex.size = igraph::V(.)$PageRank/max(igraph::V(.)$PageRank) * 5 + 2,
+    edge.width = .1,
+    asp = 0
+  )
+```
+
+Let's take a look at what hashtags are placed together in the same communities. 
+
+```{r, echo = F}
+
+largestComponent %>%
+  igraph::as_data_frame('vertices') %>%
+  dplyr::arrange(PageRank) %>%
+  dplyr::group_by(community) %>%
+  dplyr::top_n(10, PageRank) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(name = purrr::map2_chr(name, community, ~paste0(paste0(rep(' ', as.numeric(.y)), collapse = ''), .x))) %>%
+  dplyr::mutate(name = factor(name, unique(name))) %>%
+  ggplot2::ggplot(ggplot2::aes(x = name, y = PageRank, fill = as.character(community))) +
+  ggplot2::geom_col(color= 'black') +
+  ggplot2::facet_wrap(~community, scales = 'free') +
+  ggplot2::scale_fill_manual(values = hashtag_pal) +
+  ggplot2::coord_flip()+
+  ggplot2::theme_bw() +
+  ggplot2::theme(legend.position="none")
+```
+
+We've already identified the different communities, now let's examine how the different communities interact with eachother. We can now create super nodes that represent the communities. Edges in this new graph would represent people who used hashtags from two different communities. We can do this by converting the graph back to a data frame and combining the hashtags that belong in the same community togeather. 
+
+First, we want to tag edge with the communities of both nodes. This will be helpful in determinining which edges connect two different communties.
+
+```{r}
+largestComponent_summary <- largestComponent %>%
+  {
+    igraph::E(.)$tailCommunity <- igraph::tail_of(., igraph::E(.))$community; #store node information in  
+    igraph::E(.)$headCommunity <- igraph::head_of(., igraph::E(.))$community; #edges to reference later
+    .
+  } 
+
+igraph::E(largestComponent_summary)[[1:6]]
+```
+
+Then we convert the graph into a dataframe and keep only edges connecting two different communities. We then want to create the `top_hashes` edge attribute - this is a single string summary of which hashtags people commonly use from both communities. 
+
+```{r}
+
+vertex_df <- igraph::as_data_frame(largestComponent_summary, 'vertices')
+edge_df <- igraph::as_data_frame(largestComponent_summary, 'edges')
+
+edge_df <- edge_df %>%
+  dplyr::filter(tailCommunity != headCommunity) %>%# we only want edges connecting two different communities 
+  #1-6 is the same as 6-1, so let's remove dupliates
+  dplyr::mutate(
+    tail = purrr::map2_dbl(tailCommunity, headCommunity, min) %>% round %>% as.character(),
+    head = purrr::map2_dbl(tailCommunity, headCommunity, max) %>% round %>% as.character()
+  ) %>%
+  dplyr::group_by(tail, head) %>%
+  tidyr::nest(.key = 'top_hashes') %>%
+  dplyr::mutate(top_hashes = purrr::map(top_hashes, function(x){
+    top_hashes <- x %>%
+      dplyr::arrange(dplyr::desc(weight)) %>%
+      head(3) %>%
+      {paste(.$from, .$to, sep = ' | ', collapse = '\n')}
+
+    })) %>%
+  tidyr::unnest()
+
+edge_df
+```
+
+We want to make a similar vertex attribute to give us an idea of what hashtags belong to each community. We should also take this opportunity to color the nodes according to their community pallete.
+
+```{r}
+
+vertex_df <- vertex_df %>%
+  dplyr::mutate(community = as.character(community)) %>%
+  dplyr::group_by(community) %>%
+  tidyr::nest() %>%
+  dplyr::mutate(top_hashes = purrr::map_chr(data, function(x){
+    x %>%
+      head %>%
+      .$name %>%
+      paste(collapse = '\n')
+    })) %>%
+  dplyr::select(-data) %>%
+  dplyr::mutate(color = purrr::map_chr(community, function(x){hashtag_pal[x]}))
+
+vertex_df
+        
+```
+
+We can see the summary structure of the plot.
+
+```{r}
+set.seed(4321)
+largestComponent_summary <- igraph::graph_from_data_frame(edge_df, F, vertex_df)
+plot(largestComponent_summary, asp = 0)
+```
+
+We can replace the nodes with text that summarizes the hashtags found in the community.
+
+```{r, echo = F}
+set.seed(4321)
+largestComponent_summary %>%
+  plot(
+    vertex.label = igraph::V(.)$top_hashes,
+    vertex.label.cex = .5,
+    vertex.size = 2, 
+    vertex.shape = 'none',
+    asp = 0) 
+```
+
+We can also label the edges with the hashtags that connect the communities.
+
+```{r, echo = F}
+set.seed(4321)
+largestComponent_summary %>%
+  plot(
+    edge.label = igraph::E(.)$top_hashes,
+    edge.label.cex = .5,
+    vertex.size = 2,
+    vertex.shape = 'none',
+    vertex.label = '',
+    asp = 0
+  )
+```
+
+# Bonus: Topic Modelling
+
+We won't conduct a full text analysis of these tweets, but it is worth mentioning that in topic modelling, we are often tasked with the tokenization of text - that is, we need to split the text into single words. We are also tasked with the removal of **stop words** or junk words that only add noise to the model. The interesting thing about the analysis we have is that hashtags serve as a type of tokenized text. It also doesn't need to be cleaned because all hashtags, by nature of them being explicitly created, are important. 
+
+We will proceed to create a topic model with these hashtags. If you want to dig deeper into the topic modelling world, then I highly recommend reading [Silge and Robinson's  **Tidy Text Mining in R**](https://www.tidytextmining.com). 
+
+Let's revisit the **user -> hashtag** edge list we created earlier and select edges that only belong in the larger component we just explored. 
+
+```{r}
+tweet_hashtag_edges <- tweet_hashtag_edges %>%
+  dplyr::filter(hashtags %in% igraph::V(largestComponent)$name)  %>%
+  dplyr::select(-type)
+```
+
+With this data frame we can create something called a **document term matrix**. This is a matrix where the documents are the rows, the terms are the columns, and their co-occurance is stored in their intersection. Let's create one:
+
+```{r}
+tweets_sparse_hash <- tweet_hashtag_edges %>%
+  tidytext::cast_sparse(user_key, hashtags, weight)
+
+tweets_sparse_hash[1:10, 1:5] 
+```
+
+The beautiful thing about this kind of matrix is that there are a number of topic modelling functions that can work with this. Latent Dirichlet Allocation (LDA) is one that is frequently used. However, we will work with Structural Topic Models (STM). If you want to learn more about STM, you can check out the [package authors' site](http://www.structuraltopicmodel.com) which contain's a number of great references. Let's use STM to identify 8 topics in our text. I chose 8 to match the 
+
+```{r}
+##Model takes a minute.
+##I just pre ran it for you.  
+# set.seed(4321)
+# topic_model_hash <- stm::stm(tweets_sparse_hash, K = 8,
+#                              verbose = FALSE, init.type = "Spectral")
+# readr::write_rds(topic_model_hash, 'twitter_troll_topic_model_8.rds')
+
+topic_model_hash <- readr::read_rds("twitter_troll_topic_model_8.rds")
+
+summary(topic_model_hash)
+```
+
+We can grab the beta - the probability a term (here a hashtag) belongs to a topic.
+
+```{r}
+td_beta_hash <- tidytext::tidy(topic_model_hash)
+
+td_beta_hash %>%
+  head(8) %>%
+  knitr::kable()
+```
+
+Here we see that **#politics** has a strong probability of belonging to topic 1. It's important to note that a term can belong to many topics. The beta simply tells us how likely we will see a particular wodrd in a particular topic. Let's explore the words most closely related to each topic. 
+
+```{r}
+td_beta_hash %>%
+  dplyr::group_by(topic) %>%
+  dplyr::top_n(5, beta) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(dplyr::desc(beta)) %>%
+  dplyr::mutate(term = purrr::map2_chr(term, topic, ~paste0(paste0(rep(' ', as.numeric(.y)), collapse = ''), .x))) %>%
+  dplyr::mutate(term = factor(term, unique(term))) %>%
+  dplyr::mutate(topic = paste0("Topic ", topic)) %>%
+  ggplot2::ggplot(ggplot2::aes(term, beta, fill = as.factor(topic))) +
+  ggplot2::geom_col(alpha = 0.8, show.legend = FALSE, color = 'black') +
+  ggplot2::facet_wrap(~ topic, scales = "free") +
+  ggplot2::coord_flip() +
+  ggplot2::labs(x = NULL, y = expression(beta),
+       title = "Grouping of Hashtags: Highest word probabilities for each topic",
+       subtitle = "Different words are associated with different topics") +
+  ggplot2::scale_fill_brewer(type = 'qual') +
+  ggplot2::theme_bw()
+```
+
+Now, like we did with the community detection alogrithm earlier, we can use these topics to mark or color the our graph. Again, while it is possible that a word can be strongly related to multiple topics, we will need to choose one topic to color a hashtag. To do this, we will choose the topic associated with the word's highest beta. 
+
+```{r}
+markedTopic<- td_beta_hash %>%
+  dplyr::group_by(term) %>%
+  dplyr::top_n(1, wt = beta) %>%
+  dplyr::select(term, topic, beta) 
+
+markedTopic %>%
+  head %>%
+  knitr::kable()
+
+topicLargestComponent <- largestComponent %>%
+  igraph::as_data_frame('both') %>%
+  {
+    .$vertices <- dplyr::left_join(.$vertices, markedTopic, by = c('name' = 'term')) %>%
+      dplyr::mutate(color = purrr::map_chr(topic, ~hashtag_pal[.x]));
+    
+    igraph::graph_from_data_frame(.$edges, F, .$vertices)
+  }
+
+plot(topicLargestComponent, vertex.label = '', asp = 0, vertex.size = 3, edge.width = .1)
+```
+
+
+# Conclusion
+
+The really cool thing about working with twitter data sets is that you can explore a lot of different connections. You can follow a retweet network, you can see how hashtags relate to eachother and you can even explore how different people follow one another. I'm not sure if analysis of this particular dataset taught us anything new about the Russian Twitter Trolls, but it did give us an opportunity to see how to graph networks in **R** and to see how the `igraph` package functions within the greater **R** ecosystem. I hope this tutorial helped you learn something.
+
+Cheers,
+Ben
