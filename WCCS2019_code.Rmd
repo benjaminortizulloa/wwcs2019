@@ -681,4 +681,5 @@ plot(topicLargestComponent, vertex.label = '', asp = 0, vertex.size = 3, edge.wi
 The really cool thing about working with twitter data sets is that you can explore a lot of different connections. You can follow a retweet network, you can see how hashtags relate to eachother and you can even explore how different people follow one another. I'm not sure if analysis of this particular dataset taught us anything new about the Russian Twitter Trolls, but it did give us an opportunity to see how to graph networks in **R** and to see how the `igraph` package functions within the greater **R** ecosystem. I hope this tutorial helped you learn something.
 
 Cheers,
+
 Ben
