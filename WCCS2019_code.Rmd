@@ -57,7 +57,7 @@ Before anything, let's load the data and look at what columns we have available.
 
 ```{r, message=F}
 #load data
-tweets <- readr::read_csv('../../igraph-data-days-texas-2019/russian-troll-tweets/tweets.csv')
+tweets <- readr::read_csv('tweets.csv')
 
 names(tweets)
 ```
